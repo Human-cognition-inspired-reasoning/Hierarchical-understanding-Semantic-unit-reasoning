@@ -39,6 +39,9 @@ LEVEL3 = ["긍정", "부정", "인공물"]
 FRAME_GRID = ("* In every room, the agent walks to one of the objects, and the object is chosen by the same rule. The "
               "rule depends only on what the objects are and where they are in the room.")
 FACE = set()
+UNICODE = Path(__file__).resolve().parent / "emoji-test.txt"
+SUBGROUP = {}
+EXTRA = []
 GLYPH = {k: v["glyph"] for k, v in json.load(open("E:/fluent_meta.json", encoding="utf-8")).items()}
 
 
@@ -85,7 +88,26 @@ def load(pool_dir=None, attr_file=None):
         F[u].update({k: "U" for k in COLORS if k != c and F[u][k] == "T"})
         if not one_shape(u):
             F[u].update({k: "U" for k in SHAPES if F[u][k] == "T"})
+    groups = unicode_groups()
+    SUBGROUP.update({u: groups[GLYPH[u].replace("\ufe0f", "")] for u in base | emo})
+    EXTRA[:] = sorted({f"gr:{a}" for a, _ in SUBGROUP.values()} | {f"sg:{b}" for _, b in SUBGROUP.values()})
+    for u in base | emo:
+        mine = {f"gr:{SUBGROUP[u][0]}", f"sg:{SUBGROUP[u][1]}"}
+        F[u].update({k: "T" if k in mine else "F" for k in EXTRA})
     return attrs, F, (lambda u, a: votes[u][a] >= STRONG and F[u][a] == "T"), sorted(base), sorted(base | emo), len(emo - base)
+
+
+def unicode_groups():
+    """Glyph without FE0F -> (Unicode group, subgroup)."""
+    out, grp, sub = {}, None, None
+    for line in open(UNICODE, encoding="utf-8"):
+        if line.startswith("# group:"):
+            grp = line.split(":", 1)[1].strip()
+        elif line.startswith("# subgroup:"):
+            sub = line.split(":", 1)[1].strip()
+        elif "; fully-qualified" in line:
+            out["".join(chr(int(c, 16)) for c in line.split(";")[0].split()).replace("\ufe0f", "")] = (grp, sub)
+    return out
 
 
 def is_small(u):
@@ -468,6 +490,9 @@ def same_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         if any(apply(h, query, F, attrs) not in (None, qt) for h in cons) or any(h[0] == "odd" for h in cons):
             continue
         names = [o[0] for o in query.objs]
+        shared = collections.Counter(SUBGROUP[r.objs[t][0]][1] for r, t in examples)
+        if any(SUBGROUP[n][1] in {k for k, c in shared.items() if c >= 2} for i, n in enumerate(names) if i != qt):
+            continue
         other = [k for k in range(len(names)) if k != qt and F[names[k]][f] == "T"]
         rest = [k for k in range(len(names)) if F[names[k]][f] != "T"]
         labels = rng.sample(other + rng.sample(rest, 2), 3)
@@ -534,7 +559,8 @@ def main():
         fams[lv] = [f for f in fam if sum(strong(u, f) for u in pools[lv]) >= MAJ and sum(F[u][f] == "F" for u in pools[lv]) >= 3]
     print(f"속성 {len(attrs)}개 | 기본 풀 {len(base)}개, 감정 확장 {n_added}개 | 결정 특징: " +
           " / ".join(f"L{k} {len(v)}개" for k, v in fams.items()), flush=True)
-    H = rivals(attrs)
+    ext = attrs + EXTRA
+    H = rivals(ext)
     (args.out / "images").mkdir(parents=True, exist_ok=True)
     recs = []
     for s in range(args.sessions):
@@ -556,7 +582,7 @@ def main():
             make = same_item if t == "same" else odd_item
             configure(*SIZE[level])
             examples, query, labels, label = make(rng, level, F, strong, pools[level],
-                                                  fams[level], attrs, H, next(qpos[t]))
+                                                  fams[level], ext, H, next(qpos[t]))
             label["grid"] = N
             render_grid(examples, query, labels, args.out / img)
             inp = {"text": grid_prompt(examples, query, labels, False),
