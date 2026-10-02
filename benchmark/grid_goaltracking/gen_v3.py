@@ -8,8 +8,11 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+from matplotlib.colors import rgb_to_hsv
 from matplotlib.patches import FancyArrowPatch, Rectangle
 from PIL import Image
+from scipy import ndimage
+from scipy.spatial import ConvexHull
 
 from grid_common import canvas, cell, disc, is_tile, save, text, write
 
@@ -29,6 +32,8 @@ T_MIN, F_MAX, STRONG = 8, 1, 9
 EMOTION = ["기쁨", "슬픔", "분노"]
 UNCLEAR_AFFECT = ["놀람", "공포", "징그러움"]
 COLORS = ["빨강", "검정", "흰색", "초록", "파랑"]
+SHAPES = ["원반 모양", "길쭉함", "공 모양", "납작함", "끈 모양", "원기둥·원뿔", "하트 모양"]
+PURE = 0.9
 LEVEL3 = ["긍정", "부정", "인공물"]
 FRAME_GRID = ("* In every room, the agent walks to one of the objects, and the object is chosen by the same rule. The "
               "rule depends only on what the objects are and where they are in the room.")
@@ -73,6 +78,10 @@ def load(pool_dir=None):
     for u in base | emo:
         if meta[u]["group"] == "Symbols" and is_tile(u) and not u.endswith(" square"):
             F[u].update({c: "U" for c in COLORS})
+        c = main_color(u)
+        F[u].update({k: "U" for k in COLORS if k != c and F[u][k] == "T"})
+        if not one_shape(u):
+            F[u].update({k: "U" for k in SHAPES if F[u][k] == "T"})
     return attrs, F, (lambda u, a: votes[u][a] >= STRONG and F[u][a] == "T"), sorted(base), sorted(base | emo), len(emo - base)
 
 
@@ -80,6 +89,26 @@ def is_small(u):
     m = np.asarray(Image.open(FLUENT / f"{u}.png").convert("RGBA"))[..., 3] > 128
     ys, xs = np.nonzero(m)
     return max(ys.ptp() + 1, xs.ptp() + 1) / max(m.shape) < SMALL_SIDE or m.mean() < SMALL_AREA
+
+
+def main_color(u):
+    """Color class covering PURE of opaque pixels, else None."""
+    a = np.asarray(Image.open(FLUENT / f"{u}.png").convert("RGBA").resize((128, 128))).astype(float) / 255
+    h, s, v = rgb_to_hsv(a[..., :3][a[..., 3] > 0.5]).T
+    h = h * 360
+    lab = np.select([v < 0.35, (s < 0.2) & (v >= 0.6), s < 0.2, (h >= 290) | (h < 15), h < 40, h < 70, h < 165, h < 255],
+                    ["검정", "흰색", "회색", "빨강", "주황", "노랑", "초록", "파랑"], "보라")
+    names, cnt = np.unique(lab, return_counts=True)
+    return names[cnt.argmax()] if cnt.max() >= PURE * cnt.sum() else None
+
+
+def one_shape(u):
+    """One piece whose convexity reaches PURE."""
+    m = np.asarray(Image.open(FLUENT / f"{u}.png").convert("RGBA").resize((128, 128)))[..., 3] > 128
+    labels, k = ndimage.label(m)
+    sizes = ndimage.sum(m, labels, range(1, k + 1))
+    ys, xs = np.nonzero(m)
+    return (sizes >= 0.05 * m.sum()).sum() == 1 and m.sum() / ConvexHull(np.c_[xs, ys]).volume >= PURE
 
 
 def bfs(start, blocked):
@@ -478,23 +507,12 @@ def main():
     attrs, F, strong, base, _, n_added = load(args.pool_dir)
     pools = {1: base, 2: base, 3: base}
     fam1 = [a for a in attrs if a not in EMOTION + LEVEL3 + UNCLEAR_AFFECT]
-    probe = random.Random(1)
-
-    def grid_ok(f, pool):
-        maj = [u for u in pool if strong(u, f) and (f not in EMOTION or u in FACE)]
-        mn = [u for u in pool if F[u][f] == "F" and (f not in EMOTION or u in FACE)]
-        return len(maj) >= MAJ and len(mn) >= N_OBJ - MAJ and any(
-            majority(names, F, attrs) == frozenset(names[:MAJ])
-            for names in (probe.sample(maj, MAJ) + probe.sample(mn, N_OBJ - MAJ) for _ in range(3000)))
-
-    fams, gfams = {}, {}
+    fams = {}
     for lv, fam in ((1, fam1), (2, fam1), (3, fam1)):
         configure(*SIZE[lv])
         fams[lv] = [f for f in fam if sum(strong(u, f) for u in pools[lv]) >= MAJ and sum(F[u][f] == "F" for u in pools[lv]) >= 3]
-        gfams[lv] = [f for f in fams[lv] if lv != 2 or grid_ok(f, pools[lv])]
     print(f"속성 {len(attrs)}개 | 기본 풀 {len(base)}개, 감정 확장 {n_added}개 | 결정 특징: " +
           " / ".join(f"L{k} {len(v)}개" for k, v in fams.items()), flush=True)
-    print("다른 것 찾기 L2 결정 특징:", gfams[2], "| 같은 것 찾기 L2 결정 특징:", fams[2], flush=True)
     H = rivals(attrs)
     (args.out / "images").mkdir(parents=True, exist_ok=True)
     recs = []
@@ -517,7 +535,7 @@ def main():
             make = same_item if t == "same" else odd_item
             configure(*SIZE[level])
             examples, query, labels, label = make(rng, level, F, strong, pools[level],
-                                                  (fams if t == "same" else gfams)[level], attrs, H, next(qpos[t]))
+                                                  fams[level], attrs, H, next(qpos[t]))
             label["grid"] = N
             render_grid(examples, query, labels, args.out / img)
             inp = {"text": grid_prompt(examples, query, labels, False),
