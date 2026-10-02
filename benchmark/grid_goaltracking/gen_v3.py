@@ -44,6 +44,7 @@ SUBGROUP = {}
 EXTRA = []
 NOT_DECIDING = []
 PARENT, CHILDREN, NOT_SIB, BAN, AUTO_U = {}, {}, [], {}, set()
+CLOSE, CATEGORY = {}, {}
 VISUAL_SHARE = 0.2
 GLYPH = {k: v["glyph"] for k, v in json.load(open("E:/fluent_meta.json", encoding="utf-8")).items()}
 
@@ -72,7 +73,8 @@ def ancestors(a):
 
 def siblings(a):
     p = PARENT.get(a)
-    return set() if p is None or p in NOT_SIB else set(CHILDREN[p]) - {a}
+    near = set() if p is None or p in NOT_SIB else set(CHILDREN[p]) - {a}
+    return near | CLOSE.get(a, set())
 
 
 def allowed(pool, deciding):
@@ -111,11 +113,16 @@ def load_manual(attr_file):
     CHILDREN.update(ont["부모"])
     PARENT.update({c: p for p, cs in ont["부모"].items() for c in cs})
     NOT_SIB[:] = ont["형제로 보지 않음"]
+    for a, bs in ont.get("가까운 속성", {}).items():
+        for b in bs:
+            CLOSE.setdefault(a, set()).add(b)
+            CLOSE.setdefault(b, set()).add(a)
     attrs = [a for a in PARENT if a not in ont["속성 아님"]] + ["자연물", "인공물", "도형"]
     rows = list(csv.DictReader(open(attr_file, encoding="utf-8-sig")))
     F = {}
     for r in rows:
         u = r["이름"]
+        CATEGORY[u] = r["범주"]
         mine = set()
         for a in filter(None, r["속성"].split(";")):
             mine |= {a, *ancestors(a)}
@@ -388,6 +395,8 @@ def make_room(rng, f, F, strong, pool, used, want, wall_kind, attrs):
     cells = [(r, c) for r in range(1, N + 1) for c in range(1, N + 1)]
     for _ in range(4000 if emo else 800):
         names = rng.sample(maj_pool, n_maj) + rng.sample(min_pool, n_min)
+        if CATEGORY and len({CATEGORY[n] for n in names[n_maj:]}) < n_min:
+            continue
         if majority(names, F, attrs) != frozenset(names[:n_maj]):
             continue
         walls = walls_for(rng, wall_kind)
@@ -617,6 +626,10 @@ def odd_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         examples = [(r, t) for r, t, _ in got[:N_EX]]
         query, qt, qkind = got[N_EX]
         cons = [h for h in H if all(apply(h, r, F, attrs) == t for r, t in examples)]
+        targets = [r.objs[t][0] for r, t in examples]
+        if CATEGORY and any(sum(F[u][a] == "T" for u in targets) >= 3 for a in attrs
+                            if a not in ("자연물", "인공물", "도형") and not a.startswith("gr:")):
+            continue
         same_rule = any(h[0] == "feat" and h[1] is not None for h in cons)
         if same_rule or any(apply(h, query, F, attrs) not in (None, qt) for h in cons):
             continue
