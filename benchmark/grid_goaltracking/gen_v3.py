@@ -23,7 +23,8 @@ EX_ICON, Q_ICON = 56, 72
 EX_CELL, Q_CELL = round(EX_ICON / 0.76), round(Q_ICON / 0.76)
 SMALL_SIDE, SMALL_AREA = 0.8, 0.3
 N_OBJ, MAJ = 5, 3
-SIZE = {1: (6, 5), 2: (7, 5), 3: (8, 5)}
+SIZE = {1: (6, 5), 2: (6, 5), 3: (6, 5)}
+N_EX = 4
 WALLS = {6: {"short": (1, 2, 2, 3), "maze": (3, 4, 2, 4)},
          7: {"short": (2, 3, 2, 3), "maze": (0, 0, 2, 5)},
          8: {"short": (2, 4, 2, 4), "maze": (0, 0, 2, 5)}}
@@ -57,11 +58,13 @@ def parse(raw, attrs):
     return list(dict.fromkeys(got))[:5]
 
 
-def load(pool_dir=None):
-    attrs = [r["속성"] for r in csv.DictReader(open(SV / "attributes_48.csv", encoding="utf-8-sig"))]
+def load(pool_dir=None, attr_file=None):
+    attr_file = Path(attr_file) if attr_file else SV / "attributes_48.csv"
+    attrs = [r["속성"] for r in csv.DictReader(open(attr_file, encoding="utf-8-sig"))]
+    tag = "48" if attr_file.name == "attributes_48.csv" else f"_{attr_file.stem}"
     votes = collections.defaultdict(collections.Counter)
     for m in ("gpt-6-sol", "claude-sonnet-5-5"):
-        for l in open(SV / f"features48_{m}_seq_raw.jsonl", encoding="utf-8"):
+        for l in open(SV / f"features{tag}_{m}_seq_raw.jsonl", encoding="utf-8"):
             c = json.loads(l)
             votes[c["emoji"]].update(parse(c["raw"], attrs))
     if pool_dir:
@@ -195,7 +198,19 @@ def rivals(attrs):
     hs = [("odd", S, D) for S in ("near", "far") for D in ("path", "manhattan")]
     hs += [("feat", g, w, S, D) for g in [None] + attrs for w in ("T", "F") for S in ("near", "far")
            for D in ("path", "manhattan") if not (g is None and w == "F")]
+    hs += [("pos", reach, k, sk, t, st) for reach in (True, False) for k in ("r", "c", "dr", "dc") for sk in (1, -1)
+           for t in ("r", "c") for st in (1, -1) if t != k]
     return hs + [("alpha", "first"), ("alpha", "last")]
+
+
+def pos_pick(room, reach, k, sk, t, st):
+    """Extreme object by row, column, or offset from the agent."""
+    def val(i, key):
+        (r, c), (ar, ac) = room.objs[i][1], room.agent
+        return {"r": r, "c": c, "dr": abs(r - ar), "dc": abs(c - ac)}[key]
+
+    cands = [i for i in range(len(room.objs)) if not reach or room.dist["path"][i] is not None]
+    return unique_best(cands, lambda i: (sk * val(i, k), st * val(i, t)))
 
 
 def apply(h, room, F, attrs):
@@ -203,6 +218,8 @@ def apply(h, room, F, attrs):
         return odd_pick(room, F, attrs, h[1], h[2])
     if h[0] == "feat":
         return feat_pick(room, F, *h[1:])
+    if h[0] == "pos":
+        return pos_pick(room, *h[1:])
     names = [o[0] for o in room.objs]
     return (min if h[1] == "first" else max)(range(len(names)), key=lambda i: names[i])
 
@@ -361,12 +378,15 @@ def draw_room(ax, x0, y0, cw, title, room, target=None, labels=None):
 
 def render_grid(examples, query, labels, path):
     ew, qw, gap = N * EX_CELL, N * Q_CELL, 40
-    width = max(3 * ew + 2 * gap + 60, qw + 80)
-    height = ew + qw + 170
+    cols = 2 if len(examples) == 4 else len(examples)
+    rows = -(-len(examples) // cols)
+    width = max(cols * ew + (cols - 1) * gap + 60, qw + 80)
+    height = rows * (ew + 70) + qw + 100
     fig, ax = canvas(width, height)
-    x0 = (width - (3 * ew + 2 * gap)) / 2
+    x0 = (width - (cols * ew + (cols - 1) * gap)) / 2
     for j, (room, t) in enumerate(examples):
-        draw_room(ax, x0 + j * (ew + gap), height - ew - 45, EX_CELL, f"Example {j + 1}", room, target=t)
+        r, c = divmod(j, cols)
+        draw_room(ax, x0 + c * (ew + gap), height - (r + 1) * (ew + 70) + 25, EX_CELL, f"Example {j + 1}", room, target=t)
     draw_room(ax, (width - qw) / 2, 20, Q_CELL, "Question", query, labels=labels)
     ax.set_xlim(0, width)
     ax.set_ylim(0, height)
@@ -432,18 +452,18 @@ def same_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         f = rng.choice(fam)
         wants = ["wall", "enclosed"]
         rng.shuffle(wants)
-        wants = ["single"] + wants
-        got, used, ws = [None] * 4, set(), wants + [want_q]
-        for j in (3, 0, 1, 2):
-            g = make_room_same(rng, f, F, strong, pool, used, ws[j], wall_q if j == 3 else "short")
+        wants = ["single"] * (N_EX - 2) + wants
+        got, used, ws = [None] * (N_EX + 1), set(), wants + [want_q]
+        for j in [N_EX, *range(N_EX)]:
+            g = make_room_same(rng, f, F, strong, pool, used, ws[j], wall_q if j == N_EX else "short")
             if g is None:
                 break
             got[j] = g
-            used |= {o[0] for o in g[0].objs} if j == 3 else {g[0].objs[g[1]][0]}
+            used |= {o[0] for o in g[0].objs} if j == N_EX else {g[0].objs[g[1]][0]}
         if None in got:
             continue
-        examples = [(r, t) for r, t, _ in got[:3]]
-        query, qt, qkind = got[3]
+        examples = [(r, t) for r, t, _ in got[:N_EX]]
+        query, qt, qkind = got[N_EX]
         cons = [h for h in H if all(apply(h, r, F, attrs) == t for r, t in examples)]
         if any(apply(h, query, F, attrs) not in (None, qt) for h in cons) or any(h[0] == "odd" for h in cons):
             continue
@@ -452,8 +472,8 @@ def same_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         rest = [k for k in range(len(names)) if F[names[k]][f] != "T"]
         labels = rng.sample(other + rng.sample(rest, 2), 3)
         labels.insert(qp, qt)
-        label = {"answer": "ABCD"[qp], "type": "same", "level": level, "deciding": [f] * 4, "query_kind": qkind,
-                 "example_kinds": [g[2] for g in got[:3]], "labels": labels, "n_consistent": len(cons), "tries": tries,
+        label = {"answer": "ABCD"[qp], "type": "same", "level": level, "deciding": [f] * (N_EX + 1), "query_kind": qkind,
+                 "example_kinds": [g[2] for g in got[:N_EX]], "labels": labels, "n_consistent": len(cons), "tries": tries,
                  "examples": [dict(dump_room(r), target=t) for r, t in examples], "query": dump_room(query)}
         return examples, query, labels, label
 
@@ -466,21 +486,21 @@ def odd_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         tries += 1
         if tries > 3000:
             raise RuntimeError(f"다른 것 찾기 L{level} 문항을 만들지 못했습니다")
-        fs = rng.sample(fam, 4) if len(fam) >= 4 else [rng.choice(fam) for _ in range(4)]
+        fs = rng.sample(fam, N_EX + 1) if len(fam) > N_EX else [rng.choice(fam) for _ in range(N_EX + 1)]
         wants = ["wall", "enclosed"]
         rng.shuffle(wants)
-        wants = ["single"] + wants
-        got, used, ws = [None] * 4, set(), wants + [want_q]
-        for j in (3, 0, 1, 2):
-            g = make_room(rng, fs[j], F, strong, pool, used, ws[j], wall_q if j == 3 else "short", attrs)
+        wants = ["single"] * (N_EX - 2) + wants
+        got, used, ws = [None] * (N_EX + 1), set(), wants + [want_q]
+        for j in [N_EX, *range(N_EX)]:
+            g = make_room(rng, fs[j], F, strong, pool, used, ws[j], wall_q if j == N_EX else "short", attrs)
             if g is None:
                 break
             got[j] = g
-            used |= {o[0] for o in g[0].objs} if j == 3 else {g[0].objs[g[1]][0]}
+            used |= {o[0] for o in g[0].objs} if j == N_EX else {g[0].objs[g[1]][0]}
         if None in got:
             continue
-        examples = [(r, t) for r, t, _ in got[:3]]
-        query, qt, qkind = got[3]
+        examples = [(r, t) for r, t, _ in got[:N_EX]]
+        query, qt, qkind = got[N_EX]
         cons = [h for h in H if all(apply(h, r, F, attrs) == t for r, t in examples)]
         same_rule = any(h[0] == "feat" and h[1] is not None for h in cons)
         if same_rule or any(apply(h, query, F, attrs) not in (None, qt) for h in cons):
@@ -491,7 +511,7 @@ def odd_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         labels = rng.sample(other + rng.sample([k for k in range(len(names)) if names[k] in maj], 2), 3)
         labels.insert(qp, qt)
         label = {"answer": "ABCD"[qp], "type": "odd", "level": level, "deciding": fs, "query_kind": qkind,
-                 "example_kinds": [g[2] for g in got[:3]], "labels": labels, "n_consistent": len(cons), "tries": tries,
+                 "example_kinds": [g[2] for g in got[:N_EX]], "labels": labels, "n_consistent": len(cons), "tries": tries,
                  "examples": [dict(dump_room(r), target=t) for r, t in examples], "query": dump_room(query)}
         return examples, query, labels, label
 
@@ -502,9 +522,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, default=Path("E:/benchmarks/godd_v3/insight_v3_grid200"))
     ap.add_argument("--pool-dir", type=Path)
+    ap.add_argument("--attrs", type=Path)
     args = ap.parse_args()
     rng = random.Random(args.seed)
-    attrs, F, strong, base, _, n_added = load(args.pool_dir)
+    attrs, F, strong, base, _, n_added = load(args.pool_dir, args.attrs)
     pools = {1: base, 2: base, 3: base}
     fam1 = [a for a in attrs if a not in EMOTION + LEVEL3 + UNCLEAR_AFFECT]
     fams = {}
