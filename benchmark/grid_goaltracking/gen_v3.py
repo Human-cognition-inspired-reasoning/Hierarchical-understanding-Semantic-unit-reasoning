@@ -95,6 +95,19 @@ def pick(rng, fam, k):
     return out
 
 
+def rival_group(names, n_maj, f, F, attrs):
+    """True if an attribute other than f groups two or more objects."""
+    major = set(names[:n_maj])
+    taxon = bool({"자연물", "인공물", "도형"} & {f, *ancestors(f)})
+    for a in attrs:
+        if a == f or a in ("자연물", "인공물", "도형") or a.startswith("gr:"):
+            continue
+        group = {n for n in names if F[n][a] == "T"}
+        if len(group) >= 2 and group != major and not (taxon and group < major):
+            return True
+    return False
+
+
 def compatible(fs):
     return all(b not in siblings(a) and b not in set(ancestors(a)) for a in fs for b in fs if a != b)
 
@@ -395,11 +408,8 @@ def make_room(rng, f, F, strong, pool, used, want, wall_kind, attrs):
     cells = [(r, c) for r in range(1, N + 1) for c in range(1, N + 1)]
     for _ in range(4000 if emo else 800):
         names = rng.sample(maj_pool, n_maj) + rng.sample(min_pool, n_min)
-        if CATEGORY:
-            cats = [CATEGORY[n] for n in names]
-            taxon = bool({"자연물", "인공물", "도형"} & {f, *ancestors(f)})
-            if any(cats.count(c) > 1 for c in cats[n_maj:]) or (not taxon and len(set(cats[:n_maj])) < n_maj):
-                continue
+        if CATEGORY and rival_group(names, n_maj, f, F, attrs):
+            continue
         if majority(names, F, attrs) != frozenset(names[:n_maj]):
             continue
         walls = walls_for(rng, wall_kind)
