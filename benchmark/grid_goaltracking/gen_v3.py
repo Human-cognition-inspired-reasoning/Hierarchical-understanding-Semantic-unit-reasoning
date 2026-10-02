@@ -395,8 +395,11 @@ def make_room(rng, f, F, strong, pool, used, want, wall_kind, attrs):
     cells = [(r, c) for r in range(1, N + 1) for c in range(1, N + 1)]
     for _ in range(4000 if emo else 800):
         names = rng.sample(maj_pool, n_maj) + rng.sample(min_pool, n_min)
-        if CATEGORY and len({CATEGORY[n] for n in names[n_maj:]}) < n_min:
-            continue
+        if CATEGORY:
+            cats = [CATEGORY[n] for n in names]
+            taxon = bool({"자연물", "인공물", "도형"} & {f, *ancestors(f)})
+            if any(cats.count(c) > 1 for c in cats[n_maj:]) or (not taxon and len(set(cats[:n_maj])) < n_maj):
+                continue
         if majority(names, F, attrs) != frozenset(names[:n_maj]):
             continue
         walls = walls_for(rng, wall_kind)
