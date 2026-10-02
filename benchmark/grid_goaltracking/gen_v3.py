@@ -42,6 +42,9 @@ FACE = set()
 UNICODE = Path(__file__).resolve().parent / "emoji-test.txt"
 SUBGROUP = {}
 EXTRA = []
+NOT_DECIDING = []
+PARENT, CHILDREN, NOT_SIB, BAN, AUTO_U = {}, {}, [], {}, set()
+VISUAL_SHARE = 0.2
 GLYPH = {k: v["glyph"] for k, v in json.load(open("E:/fluent_meta.json", encoding="utf-8")).items()}
 
 
@@ -61,7 +64,76 @@ def parse(raw, attrs):
     return list(dict.fromkeys(got))[:5]
 
 
+def ancestors(a):
+    while a in PARENT:
+        a = PARENT[a]
+        yield a
+
+
+def siblings(a):
+    p = PARENT.get(a)
+    return set() if p is None or p in NOT_SIB else set(CHILDREN[p]) - {a}
+
+
+def allowed(pool, deciding):
+    """Pool without emoji carrying a sibling of any deciding attribute."""
+    ban = set().union(*(siblings(d) for d in deciding))
+    return [u for u in pool if not BAN.get(u, set()) & ban]
+
+
+def pick(rng, fam, k):
+    """k distinct attributes; colour and shape drawn VISUAL_SHARE of the time."""
+    vis = [a for a in fam if {"색", "모양"} & set(ancestors(a))]
+    rest = [a for a in fam if a not in vis]
+    out = []
+    while len(out) < k:
+        a = rng.choice(vis if vis and (not rest or rng.random() < VISUAL_SHARE) else rest)
+        if a not in out:
+            out.append(a)
+    return out
+
+
+def compatible(fs):
+    return all(b not in siblings(a) and b not in set(ancestors(a)) for a in fs for b in fs if a != b)
+
+
+def add_unicode(F, names):
+    groups = unicode_groups()
+    SUBGROUP.update({u: groups[GLYPH[u].replace("\ufe0f", "")] for u in names})
+    EXTRA[:] = sorted({f"gr:{a}" for a, _ in SUBGROUP.values()} | {f"sg:{b}" for _, b in SUBGROUP.values()})
+    for u in names:
+        mine = {f"gr:{SUBGROUP[u][0]}", f"sg:{SUBGROUP[u][1]}"}
+        F[u].update({k: "T" if k in mine else "F" for k in EXTRA})
+
+
+def load_manual(attr_file):
+    ont = json.load(open(attr_file.with_name("ontology_v4.json"), encoding="utf-8"))
+    CHILDREN.update(ont["부모"])
+    PARENT.update({c: p for p, cs in ont["부모"].items() for c in cs})
+    NOT_SIB[:] = ont["형제로 보지 않음"]
+    attrs = [a for a in PARENT if a not in ont["속성 아님"]] + ["자연물", "인공물", "도형"]
+    rows = list(csv.DictReader(open(attr_file, encoding="utf-8-sig")))
+    F = {}
+    for r in rows:
+        u = r["이름"]
+        mine = set()
+        for a in filter(None, r["속성"].split(";")):
+            mine |= {a, *ancestors(a)}
+        unclear = set(filter(None, r["애매한 속성"].split(";")))
+        F[u] = {a: "T" if a in mine else "U" if a in unclear else "F" for a in attrs}
+        BAN[u] = mine | unclear
+        for fam, gate in (("색", None), ("모양", None), ("장소", "동물")):
+            kids = {a for a in attrs if fam in set(ancestors(a))}
+            if not mine & kids and (gate is None or gate in mine):
+                AUTO_U.update((u, a) for a in kids)
+    base = sorted(F)
+    add_unicode(F, base)
+    return attrs, F, (lambda u, a: F[u][a] == "T"), base, base, 0
+
+
 def load(pool_dir=None, attr_file=None):
+    if attr_file and "애매한 속성" in open(attr_file, encoding="utf-8-sig").readline():
+        return load_manual(Path(attr_file))
     attr_file = Path(attr_file) if attr_file else SV / "attributes_48.csv"
     attrs = [r["속성"] for r in csv.DictReader(open(attr_file, encoding="utf-8-sig"))]
     tag = "48" if attr_file.name == "attributes_48.csv" else f"_{attr_file.stem}"
@@ -88,13 +160,24 @@ def load(pool_dir=None, attr_file=None):
         F[u].update({k: "U" for k in COLORS if k != c and F[u][k] == "T"})
         if not one_shape(u):
             F[u].update({k: "U" for k in SHAPES if F[u][k] == "T"})
-    groups = unicode_groups()
-    SUBGROUP.update({u: groups[GLYPH[u].replace("\ufe0f", "")] for u in base | emo})
-    EXTRA[:] = sorted({f"gr:{a}" for a, _ in SUBGROUP.values()} | {f"sg:{b}" for _, b in SUBGROUP.values()})
-    for u in base | emo:
-        mine = {f"gr:{SUBGROUP[u][0]}", f"sg:{SUBGROUP[u][1]}"}
-        F[u].update({k: "T" if k in mine else "F" for k in EXTRA})
-    return attrs, F, (lambda u, a: votes[u][a] >= STRONG and F[u][a] == "T"), sorted(base), sorted(base | emo), len(emo - base)
+    add_unicode(F, base | emo)
+    ov_file = attr_file.with_name(f"{attr_file.stem}_overrides.json")
+    ov = json.load(open(ov_file, encoding="utf-8")) if ov_file.exists() else {}
+    for a, spec in ov.get("derived", {}).items():
+        attrs.append(a)
+        for u in base | emo:
+            F[u][a] = ("T" if u in spec.get("T", []) else
+                       "U" if u in spec.get("U", []) or F[u].get(spec.get("U_from"), "F") == "T" else "F")
+    for a, subs in ov.get("subgroup_only", {}).items():
+        for u in base | emo:
+            if F[u][a] == "T" and SUBGROUP[u][1] not in subs:
+                F[u][a] = "U"
+    for u, fix in ov.get("set", {}).items():
+        if u in F:
+            F[u].update(fix)
+    NOT_DECIDING[:] = ov.get("not_deciding", [])
+    derived = set(ov.get("derived", {}))
+    return attrs, F, (lambda u, a: (votes[u][a] >= STRONG or a in derived) and F[u][a] == "T"), sorted(base), sorted(base | emo), len(emo - base)
 
 
 def unicode_groups():
@@ -121,7 +204,7 @@ def main_color(u):
     a = np.asarray(Image.open(FLUENT / f"{u}.png").convert("RGBA").resize((128, 128))).astype(float) / 255
     h, s, v = rgb_to_hsv(a[..., :3][a[..., 3] > 0.5]).T
     h = h * 360
-    lab = np.select([v < 0.35, (s < 0.2) & (v >= 0.6), s < 0.2, (h >= 290) | (h < 15), h < 40, h < 70, h < 165, h < 255],
+    lab = np.select([v < 0.35, (s < 0.15) & (v >= 0.85), s < 0.2, (h >= 290) | (h < 15), h < 40, h < 70, h < 165, h < 255],
                     ["검정", "흰색", "회색", "빨강", "주황", "노랑", "초록", "파랑"], "보라")
     names, cnt = np.unique(lab, return_counts=True)
     return names[cnt.argmax()] if cnt.max() >= PURE * cnt.sum() else None
@@ -172,6 +255,7 @@ class Room:
         near = [[path[q] for q in ((r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)) if q in path] for _, (r, c) in objs]
         self.dist = {"path": [min(d) + 1 if d else None for d in near],
                      "manhattan": [abs(p[0] - agent[0]) + abs(p[1] - agent[1]) for _, p in objs]}
+        self.dist["reach_manhattan"] = [m if d is not None else None for m, d in zip(self.dist["manhattan"], self.dist["path"])]
 
 
 def majority(names, F, attrs):
@@ -217,9 +301,11 @@ def feat_pick(room, F, g, want, S, D):
 
 
 def rivals(attrs):
-    hs = [("odd", S, D) for S in ("near", "far") for D in ("path", "manhattan")]
+    dists = ("path", "manhattan", "reach_manhattan")
+    hs = [("odd", S, D) for S in ("near", "far") for D in dists]
     hs += [("feat", g, w, S, D) for g in [None] + attrs for w in ("T", "F") for S in ("near", "far")
-           for D in ("path", "manhattan") if not (g is None and w == "F")]
+           for D in dists if not (g is None and w == "F")]
+    hs += [("edge", inside, reach) for inside in (False, True) for reach in (False, True)]
     hs += [("pos", reach, k, sk, t, st) for reach in (True, False) for k in ("r", "c", "dr", "dc") for sk in (1, -1)
            for t in ("r", "c") for st in (1, -1) if t != k]
     return hs + [("alpha", "first"), ("alpha", "last")]
@@ -242,6 +328,10 @@ def apply(h, room, F, attrs):
         return feat_pick(room, F, *h[1:])
     if h[0] == "pos":
         return pos_pick(room, *h[1:])
+    if h[0] == "edge":
+        on = [i for i, (_, (r, c)) in enumerate(room.objs) if (r in (1, N) or c in (1, N)) != h[1]
+              and (not h[2] or room.dist["path"][i] is not None)]
+        return on[0] if len(on) == 1 else None
     names = [o[0] for o in room.objs]
     return (min if h[1] == "first" else max)(range(len(names)), key=lambda i: names[i])
 
@@ -292,20 +382,12 @@ def make_room(rng, f, F, strong, pool, used, want, wall_kind, attrs):
     n_min = N_OBJ - n_maj
     emo = f in EMOTION
     maj_pool = [n for n in pool if n not in used and strong(n, f) and (not emo or n in FACE)]
-    min_pool = [n for n in pool if n not in used and F[n][f] == "F" and (not emo or n in FACE)]
+    min_pool = [n for n in pool if n not in used and F[n][f] == "F" and (n, f) not in AUTO_U and (not emo or n in FACE)]
     if len(maj_pool) < n_maj or len(min_pool) < n_min:
         return None
     cells = [(r, c) for r in range(1, N + 1) for c in range(1, N + 1)]
     for _ in range(4000 if emo else 800):
-        major = rng.sample(maj_pool, n_maj)
-        if emo:
-            by_g = {"face": min_pool}
-        else:
-            by_g = {g: [n for n in min_pool if F[n][g] == "T"] for g in attrs if g != f and all(F[n][g] == "T" for n in major)}
-            by_g = {g: v for g, v in by_g.items() if len(v) >= n_min}
-        if not by_g:
-            continue
-        names = major + rng.sample(by_g[rng.choice(sorted(by_g))], n_min)
+        names = rng.sample(maj_pool, n_maj) + rng.sample(min_pool, n_min)
         if majority(names, F, attrs) != frozenset(names[:n_maj]):
             continue
         walls = walls_for(rng, wall_kind)
@@ -430,7 +512,7 @@ def make_room_same(rng, f, F, strong, pool, used, want, wall_kind):
     n_t = 1 if want == "single" else 3 if want == "both" else 2
     emo = f in EMOTION
     tpool = [n for n in pool if n not in used and strong(n, f) and (not emo or n in FACE)]
-    npool = [n for n in pool if n not in used and F[n][f] == "F" and (not emo or n in FACE)]
+    npool = [n for n in pool if n not in used and F[n][f] == "F" and (n, f) not in AUTO_U and (not emo or n in FACE)]
     if len(tpool) < n_t or len(npool) < N_OBJ - n_t:
         return None
     cells = [(r, c) for r in range(1, N + 1) for c in range(1, N + 1)]
@@ -471,13 +553,14 @@ def same_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         tries += 1
         if tries > 3000:
             raise RuntimeError(f"같은 것 찾기 L{level} 문항을 만들지 못했습니다")
-        f = rng.choice(fam)
-        wants = ["wall", "enclosed"]
+        f = pick(rng, fam, 1)[0] if PARENT else rng.choice(fam)
+        pool_f = allowed(pool, {f})
+        wants = ["basic", "wall" if want_q in ("wall", "both") else rng.choice(["wall", "enclosed"])]
         rng.shuffle(wants)
         wants = ["single"] * (N_EX - 2) + wants
         got, used, ws = [None] * (N_EX + 1), set(), wants + [want_q]
         for j in [N_EX, *range(N_EX)]:
-            g = make_room_same(rng, f, F, strong, pool, used, ws[j], wall_q if j == N_EX else "short")
+            g = make_room_same(rng, f, F, strong, pool_f, used, ws[j], wall_q if j == N_EX else "short")
             if g is None:
                 break
             got[j] = g
@@ -491,7 +574,8 @@ def same_item(rng, level, F, strong, pool, fam, attrs, H, qp):
             continue
         names = [o[0] for o in query.objs]
         shared = collections.Counter(SUBGROUP[r.objs[t][0]][1] for r, t in examples)
-        if any(SUBGROUP[n][1] in {k for k, c in shared.items() if c >= 2} for i, n in enumerate(names) if i != qt):
+        narrow = {k for k, c in shared.items() if c >= 2 and any(strong(u, f) and SUBGROUP[u][1] != k for u in pool_f)}
+        if any(SUBGROUP[n][1] in narrow for i, n in enumerate(names) if i != qt):
             continue
         other = [k for k in range(len(names)) if k != qt and F[names[k]][f] == "T"]
         rest = [k for k in range(len(names)) if F[names[k]][f] != "T"]
@@ -511,13 +595,19 @@ def odd_item(rng, level, F, strong, pool, fam, attrs, H, qp):
         tries += 1
         if tries > 3000:
             raise RuntimeError(f"다른 것 찾기 L{level} 문항을 만들지 못했습니다")
-        fs = rng.sample(fam, N_EX + 1) if len(fam) > N_EX else [rng.choice(fam) for _ in range(N_EX + 1)]
-        wants = ["wall", "enclosed"]
+        if PARENT:
+            fs = pick(rng, fam, N_EX + 1)
+        else:
+            fs = rng.sample(fam, N_EX + 1) if len(fam) > N_EX else [rng.choice(fam) for _ in range(N_EX + 1)]
+        if not compatible(fs):
+            continue
+        pool_f = allowed(pool, set(fs))
+        wants = ["basic", "wall" if want_q in ("wall", "both") else rng.choice(["wall", "enclosed"])]
         rng.shuffle(wants)
         wants = ["single"] * (N_EX - 2) + wants
         got, used, ws = [None] * (N_EX + 1), set(), wants + [want_q]
         for j in [N_EX, *range(N_EX)]:
-            g = make_room(rng, fs[j], F, strong, pool, used, ws[j], wall_q if j == N_EX else "short", attrs)
+            g = make_room(rng, fs[j], F, strong, pool_f, used, ws[j], wall_q if j == N_EX else "short", attrs)
             if g is None:
                 break
             got[j] = g
@@ -552,7 +642,7 @@ def main():
     rng = random.Random(args.seed)
     attrs, F, strong, base, _, n_added = load(args.pool_dir, args.attrs)
     pools = {1: base, 2: base, 3: base}
-    fam1 = [a for a in attrs if a not in EMOTION + LEVEL3 + UNCLEAR_AFFECT]
+    fam1 = [a for a in attrs if a not in EMOTION + LEVEL3 + UNCLEAR_AFFECT + NOT_DECIDING]
     fams = {}
     for lv, fam in ((1, fam1), (2, fam1), (3, fam1)):
         configure(*SIZE[lv])
