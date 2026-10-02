@@ -410,7 +410,7 @@ def same_item(rng, level, F, strong, pool, fam, attrs, H, qp):
             if g is None:
                 break
             got[j] = g
-            used = {o[0] for o in got[3][0].objs}
+            used |= {o[0] for o in g[0].objs} if j == 3 else {g[0].objs[g[1]][0]}
         if None in got:
             continue
         examples = [(r, t) for r, t, _ in got[:3]]
@@ -447,7 +447,7 @@ def odd_item(rng, level, F, strong, pool, fam, attrs, H, qp):
             if g is None:
                 break
             got[j] = g
-            used = {o[0] for o in got[3][0].objs}
+            used |= {o[0] for o in g[0].objs} if j == 3 else {g[0].objs[g[1]][0]}
         if None in got:
             continue
         examples = [(r, t) for r, t, _ in got[:3]]
@@ -488,7 +488,7 @@ def main():
             for names in (probe.sample(maj, MAJ) + probe.sample(mn, N_OBJ - MAJ) for _ in range(3000)))
 
     fams, gfams = {}, {}
-    for lv, fam in ((1, fam1), (2, fam1), (3, LEVEL3)):
+    for lv, fam in ((1, fam1), (2, fam1), (3, fam1)):
         configure(*SIZE[lv])
         fams[lv] = [f for f in fam if sum(strong(u, f) for u in pools[lv]) >= MAJ and sum(F[u][f] == "F" for u in pools[lv]) >= 3]
         gfams[lv] = [f for f in fams[lv] if lv != 2 or grid_ok(f, pools[lv])]
